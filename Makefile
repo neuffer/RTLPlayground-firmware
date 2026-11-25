@@ -33,7 +33,7 @@ else
 SDCC_BANNER = system
 endif
 # Keep default constants in the fixed HOME code area.
-CC_FLAGS = -mmcs51 -I. -Imachine -Ihttpd -Iuip
+CC_FLAGS = -mmcs51 -I. -Imachine -Imachine/pcb -Ihttpd -Iuip -Ipoe
 MACHINE_CC_FLAGS =
 ASM ?= sdas8051
 AFLAGS= -plosgff
@@ -98,6 +98,46 @@ ifneq ($(MACHINE_PCB_NAME),)
 endif
 endif
 endif
+# PoE (from #712 + themmm's RTL8238C driver + scow92's v2 patch, ported onto
+# the machines.json registry; local port, not upstream's design). A machine
+# entry may carry "poe_chip"; the build then compiles
+# machine/pcb/<pcb>__POE.c (the PCB file plus its poe_cfg) instead of the PCB
+# file, and extracts the PSE image(s) from stock_fw/$(MACHINE).bin.
+# NO_POE=1 drops PoE support for boards that have it.
+ifneq ($(NO_POE),)
+	CC_FLAGS += -DNO_POE
+endif
+POE_SRCS := poe/poe.c
+ifneq ($(strip $(MACHINE_DESCRIPTOR)),)
+MACHINE_POE_CHIP := $(shell jq -r --arg machine "$(MACHINE)" '.[] | select(.machine == $$machine) | .poe_chip // empty' $(MACHINE_DESCRIPTOR) 2>/dev/null)
+endif
+POE_FW_DIR := poe/firmware
+ifneq ($(strip $(MACHINE_POE_CHIP)),)
+ifndef NO_POE
+POE_ENABLED := 1
+# Was #define MACHINE_POE_CHIP in machine/<MACHINE>.h before the registry.
+CC_FLAGS += -DMACHINE_POE_CHIP=$(MACHINE_POE_CHIP)
+POE_STOCK_FW := stock_fw/$(MACHINE).bin
+POE_FW_SRC := $(POE_FW_DIR)/poe_fw_$(MACHINE_POE_CHIP)_$(MACHINE).c
+POE_CHIP_SRCS_RTL8238C := poe/rtl8238c.c poe/rtl8238c_image_b.c
+POE_CHIP_SRCS := $(POE_CHIP_SRCS_$(MACHINE_POE_CHIP))
+# The RTL8238C driver also sends the stock firmware's second image, to chips
+# whose register 0xe8 does not read 2. It goes into BANK4.
+ifeq ($(MACHINE_POE_CHIP),RTL8238C)
+POE_FW_B_SRC := $(POE_FW_DIR)/poe_fw_RTL8238B_$(MACHINE).c
+endif
+ifeq ($(POE_CHIP_SRCS),)
+$(error poe_chip=$(MACHINE_POE_CHIP) has no driver in poe/)
+endif
+POE_SRCS += $(POE_CHIP_SRCS)
+POE_MACHINE_SRC := $(basename $(MACHINE_SRC))__POE.c
+ifeq ($(wildcard $(POE_MACHINE_SRC)),)
+$(error poe_chip is set for $(MACHINE) but $(POE_MACHINE_SRC) does not exist)
+endif
+MACHINE_SRC := $(POE_MACHINE_SRC)
+endif
+endif
+
 # Health instrumentation and the "health" console command: HEALTH=1 gmake ...
 ifneq ($(HEALTH),)
 	CC_FLAGS += -DHEALTH
@@ -174,6 +214,8 @@ create_build_dir: $(SDCC)
 	mkdir -p "$(BUILDDIR)/machine"
 	mkdir -p "$(BUILDDIR)/machine/pcb"
 	mkdir -p "$(BUILDDIR)/crypto"
+	mkdir -p "$(BUILDDIR)/poe"
+	mkdir -p "$(BUILDDIR)/poe/firmware"
 
 $(MACHINE_REGISTRY):
 	@echo "ERROR: machine registry is missing (expected $(MACHINE_REGISTRY))." >&2
@@ -255,6 +297,7 @@ SRCS += \
 	uip/uip-fw.c \
 	uip/uip-neighbor.c \
 	uip/uip-split.c
+SRCS += $(POE_SRCS) $(POE_FW_SRC) $(POE_FW_B_SRC)
 
 OBJS = ${SRCS:%.c=$(BUILDDIR)/%.rel}
 MACHINE_OBJ = $(BUILDDIR)/$(MACHINE_SRC:.c=.rel)
@@ -301,12 +344,35 @@ httpd: html_data.h
 $(SUBDIRS):
 	$(MAKE) -C $@ BUILDDIR=$(BUILDDIR)
 
+# The PSE image is generated from the local, uncommitted vendor image (see
+# stock_fw/README.md). Without it the build stops with an explanation.
+ifeq ($(POE_ENABLED),1)
+$(POE_STOCK_FW):
+	@echo "ERROR: PoE support for $(MACHINE) needs $(POE_STOCK_FW)." >&2
+	@echo "       Put the vendor firmware there, or build with NO_POE=1." >&2
+	@false
+
+$(POE_FW_SRC): $(POE_STOCK_FW) tools/poe_extract.c | tools
+	@mkdir -p $(dir $@)
+	@echo "Extracting $(MACHINE_POE_CHIP) PSE firmware to $@"
+	tools/$(BUILDDIR)/poe_extract -i $(POE_STOCK_FW) -c $(MACHINE_POE_CHIP) -o $@
+
+ifneq ($(POE_FW_B_SRC),)
+$(POE_FW_B_SRC): $(POE_STOCK_FW) tools/poe_extract.c | tools
+	@mkdir -p $(dir $@)
+	@echo "Extracting the second PSE firmware to $@"
+	tools/$(BUILDDIR)/poe_extract -i $(POE_STOCK_FW) -c RTL8238B -s poe_firmware_b -b BANK4 -o $@
+endif
+endif
+
 clean: $(SUBDIRSCLEAN)
 	-rm -f html_data.c html_data.h $(VERSION_HEADER) $(HTML_MIN_LIST) $(HTML_MIN_STAMP)
+	-rm -rf $(POE_FW_DIR)
 	-if [ -d $(BUILDDIR) ]; then find $(BUILDDIR) -type f ! -name "*.bin" -delete; fi
 
 distclean: $(SUBDIRSCLEAN)
 	-rm -f html_data.c html_data.h $(VERSION_HEADER) $(HTML_MIN_LIST) $(HTML_MIN_STAMP)
+	-rm -rf $(POE_FW_DIR)
 	-rm -rf $(BUILDDIR)
 	-rm -rf toolchain
 

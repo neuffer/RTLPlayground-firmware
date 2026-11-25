@@ -182,7 +182,8 @@
   {
     "machine": "KEEPLINK_KP_9000_9XHPML_X",
     "friendly_name": "keepLiNK KP-9000-9XHPML-X",
-    "pcb": "2M_PCB51_ML_V1_2"
+    "pcb": "2M_PCB51_ML_V1_2",
+    "poe_chip": "RTL8238C"
   },
   {
     "machine": "KEEPLINK_KP_9000_9XHPML_X_V1_1",
